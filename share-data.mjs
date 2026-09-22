@@ -1,32 +1,45 @@
 const DATA_URL = 'https://raw.githubusercontent.com/jowidy/tonight/data/catalog.enc.json';
-const STORAGE_KEY = 'tonight-access-key';
 let accessKey = null;
 let snapshot = null;
 let pending = null;
 let state = { locked: true, reason: 'missing', offline: false, publishedAt: null };
 
-function storage(method, value) {
-  try { return sessionStorage[method](STORAGE_KEY, value); } catch { return null; }
-}
+// Remove the previous release's origin-wide stored key during migration.
+try { sessionStorage.removeItem('tonight-access-key'); } catch { /* Storage can be disabled. */ }
 
 export function consumeAccessLink() {
   if (!location.hash.startsWith('#key=')) return false;
   const params = new URLSearchParams(location.hash.slice(1));
   const supplied = params.get('key');
-  accessKey = /^[A-Za-z0-9_-]{43}$/.test(supplied || '') ? supplied : null;
+  const nextKey = /^[A-Za-z0-9_-]{43}$/.test(supplied || '') ? supplied : null;
+  if (nextKey && nextKey === accessKey) return false;
+  accessKey = nextKey;
   snapshot = null;
   state = { locked: true, reason: accessKey ? 'opening' : 'invalid', offline: false, publishedAt: null };
-  if (accessKey) storage('setItem', accessKey);
-  else storage('removeItem');
-  const recipe = params.get('recipe');
-  const route = recipe && /^[\w-]+$/.test(recipe) ? `#/node/${recipe}` : '#/';
-  history.replaceState(history.state, '', `${location.pathname}${location.search}${route}`);
   return true;
 }
 
-if (!consumeAccessLink()) {
-  const saved = storage('getItem');
-  accessKey = /^[A-Za-z0-9_-]{43}$/.test(saved || '') ? saved : null;
+consumeAccessLink();
+
+export function getRouteHash(hash = location.hash) {
+  if (!hash.startsWith('#key=')) return hash || '#/';
+  const params = new URLSearchParams(hash.slice(1));
+  const recipe = params.get('recipe');
+  if (!recipe || !/^[\w-]+$/.test(recipe)) return '#/';
+  const section = params.get('section');
+  return `#/node/${recipe}${section ? `?section=${encodeURIComponent(section)}` : ''}`;
+}
+
+export function routeWithAccess(route = '#/') {
+  if (!accessKey) return route;
+  const params = new URLSearchParams({ key: accessKey });
+  const match = route.match(/^#\/node\/([\w-]+)(?:\?(.*))?$/);
+  if (match) {
+    params.set('recipe', match[1]);
+    const section = new URLSearchParams(match[2] || '').get('section');
+    if (section) params.set('section', section);
+  }
+  return `#${params}`;
 }
 
 function bytes(value) {

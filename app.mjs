@@ -1,5 +1,5 @@
 import { DiscoverySession } from './recommend.mjs';
-import { getCatalog, getNode, refresh, getStatus, consumeAccessLink } from './share-data.mjs';
+import { getCatalog, getNode, refresh, getStatus, consumeAccessLink, getRouteHash, routeWithAccess } from './share-data.mjs';
 
 const main = document.querySelector('#main');
 const announcement = document.querySelector('#announcement');
@@ -20,6 +20,17 @@ let matchLabelsRevealed = false;
 const inspectorState = { open: false, recipeId: null, likeId: null, details: new Map() };
 let navigationDepth = history.state?.tonight ? history.state.depth || 0 : 0;
 history.replaceState({ tonight: true, depth: navigationDepth }, '');
+
+function protectPrivateLinks() {
+  document.querySelectorAll('a[href^="#/"], a[href^="#key="]').forEach(link => {
+    const next = routeWithAccess(getRouteHash(link.getAttribute('href')));
+    if (next !== link.getAttribute('href')) link.setAttribute('href', next);
+  });
+}
+// Rewrite rendered recipe links, including links inside source notes, so opening
+// in a new tab and copying a recipe link preserve access without browser storage.
+new MutationObserver(protectPrivateLinks).observe(document.body, { childList: true, subtree: true });
+protectPrivateLinks();
 
 const icons = {
   more: '<path d="M7 10v10H3V10h4Zm0 0 5-7c1-1 3 0 2.5 2L14 9h5a2 2 0 0 1 2 2l-1 7a2 2 0 0 1-2 2H7"/>',
@@ -315,7 +326,7 @@ async function renderNode(id, anchor = '', { keepPosition = false } = {}) {
     });
     document.querySelector('#back').onclick = () => {
       if (navigationDepth > 0) history.back();
-      else location.hash = '#/';
+      else location.hash = routeWithAccess('#/');
     };
     if (keepPosition) window.scrollTo(0, priorScroll);
     else if (anchor) document.getElementById(anchor)?.scrollIntoView();
@@ -328,7 +339,7 @@ async function renderNode(id, anchor = '', { keepPosition = false } = {}) {
 
 function route({ keepPosition = false } = {}) {
   if (!catalog) { renderAccess(); return; }
-  const hash = location.hash || '#/';
+  const hash = getRouteHash();
   const match = hash.match(/^#\/node\/([\w-]+)(?:\?(.*))?$/);
   if (match) {
     renderNode(match[1], new URLSearchParams(match[2] || '').get('section') || '', { keepPosition });
@@ -350,7 +361,7 @@ function reset() {
   matchLabelsRevealed = false;
   browseScroll = 0;
   returnFocus = null;
-  if (location.hash !== '#/') location.hash = '#/';
+  if (getRouteHash() !== '#/') location.hash = routeWithAccess('#/');
   else renderBrowse({ focus: true });
   window.scrollTo(0, 0);
   say('A fresh session. All your recipes are back in the mix.', true);
@@ -384,7 +395,7 @@ async function loadCatalog(force = false) {
         matchLabelsRevealed = false;
         renderAccess();
       } else if (!catalog) renderAccess();
-      else if (!location.hash.startsWith('#/node/')) renderBrowse();
+      else if (!getRouteHash().startsWith('#/node/')) renderBrowse();
     } finally {
       renderFreshness();
       catalogRequest = null;
@@ -407,8 +418,10 @@ window.addEventListener('hashchange', () => {
     session = null;
     renderLoading();
     loadCatalog(true);
+    protectPrivateLinks();
     return;
   }
+  if (location.hash.startsWith('#/')) history.replaceState(history.state, '', routeWithAccess(location.hash));
   navigationDepth = history.state?.tonight ? history.state.depth || 0 : navigationDepth + 1;
   history.replaceState({ tonight: true, depth: navigationDepth }, '');
   route();
