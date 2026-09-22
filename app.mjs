@@ -428,11 +428,11 @@ window.addEventListener('hashchange', () => {
 });
 renderLoading();
 await loadCatalog(true);
-setInterval(() => { if (!document.hidden) loadCatalog(connectionLost); }, 60000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) loadCatalog(connectionLost); });
-window.addEventListener('online', () => loadCatalog(true));
+// The vault publishes weekly. Opening or reloading still loads the current snapshot.
+setInterval(() => { if (!document.hidden) loadCatalog(connectionLost); }, 7 * 24 * 60 * 60 * 1000);
+window.addEventListener('online', () => { if (connectionLost) loadCatalog(true); });
 window.addEventListener('pagehide', () => stopPathMotion());
-window.addEventListener('pageshow', event => { if (event.persisted) loadCatalog(true); });
+window.addEventListener('pageshow', event => { if (event.persisted && connectionLost) loadCatalog(true); });
 
 function renderAccess() {
   stopPathMotion();
