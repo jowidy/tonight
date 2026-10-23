@@ -1,4 +1,5 @@
 import { DiscoverySession } from './recommend.mjs';
+import { createSearchIndex, searchRecipes, normalizeSearch, tagLabel, parseSearchRoute, searchRoute } from './search.mjs';
 import { getCatalog, getNode, refresh, getStatus, consumeAccessLink, getRouteHash, routeWithAccess } from './share-data.mjs';
 
 const main = document.querySelector('#main');
@@ -10,6 +11,10 @@ let requestNumber = 0;
 let toastTimer;
 let browseScroll = 0;
 let lastRoute = '#/';
+let detailReturnRoute = '#/';
+let searchIndex = createSearchIndex();
+const SEARCH_PAGE_SIZE = 24;
+const searchState = { ...parseSearchRoute('#/search'), advancedOpen: null, tagQueries: { ingredients: '', traditions: '' }, scroll: 0, returnFocus: null };
 let catalogRequest = null;
 let catalogRefreshQueued = false;
 let connectionLost = false;
@@ -271,6 +276,7 @@ function renderBrowse({ focus = false } = {}) {
   }));
   main.querySelectorAll('.recipe-link').forEach(link => link.addEventListener('click', () => {
     browseScroll = window.scrollY;
+    detailReturnRoute = '#/';
     returnFocus = link.closest('.recipe-card').dataset.id;
   }));
   document.querySelector('#next').onclick = () => {
@@ -289,13 +295,136 @@ function renderBrowse({ focus = false } = {}) {
   if (focus) main.focus({ preventScroll: true });
 }
 
+
+function saveSearchRoute() {
+  const hash = searchRoute(searchState);
+  history.replaceState(history.state, '', routeWithAccess(hash));
+  document.querySelector('#search-link').href = routeWithAccess(hash);
+}
+
+function searchTagGroup(family, label, description) {
+  const values = [...new Set([...searchIndex.facets[family], ...searchState[family]])]
+    .sort((a, b) => tagLabel(a).localeCompare(tagLabel(b)));
+  return `<fieldset class="search-tag-group"><legend>${label}</legend><p id="${family}-help" class="search-hint">${description}</p>${values.length ? `<label class="tag-find-label" for="find-${family}">Find ${label.toLowerCase().slice(0, -1)} tags</label><input type="search" id="find-${family}" data-find-tags="${family}" value="${esc(searchState.tagQueries[family])}" class="tag-find" autocomplete="off" aria-controls="${family}-options"><div class="tag-options" id="${family}-options" aria-describedby="${family}-help">${values.map((value, i) => `<label class="tag-choice" data-tag-label="${esc(normalizeSearch(tagLabel(value)))}"><input type="checkbox" id="${family}-${i}" name="${family}" value="${esc(value)}"${searchState[family].has(value) ? ' checked' : ''}><span>${esc(tagLabel(value))}</span></label>`).join('')}</div><p class="tag-no-options search-hint" id="${family}-no-options" hidden>No matching tags. Try a shorter name.</p>` : '<p class="search-hint">No tags in this collection yet.</p>'}</fieldset>`;
+}
+
+function filterSearchTags(family) {
+  const value = normalizeSearch(searchState.tagQueries[family]);
+  let visible = 0;
+  main.querySelectorAll(`#${family}-options .tag-choice`).forEach(label => {
+    label.hidden = !label.dataset.tagLabel.includes(value);
+    if (!label.hidden) visible++;
+  });
+  const empty = main.querySelector(`#${family}-no-options`);
+  if (empty) empty.hidden = visible > 0;
+}
+
+function renderSearchResults({ focus = false } = {}) {
+  const matches = searchRecipes(searchIndex, searchState);
+  const pageCount = Math.max(1, Math.ceil(matches.length / SEARCH_PAGE_SIZE));
+  searchState.page = Math.min(searchState.page, pageCount);
+  const start = (searchState.page - 1) * SEARCH_PAGE_SIZE;
+  const shown = matches.slice(start, start + SEARCH_PAGE_SIZE);
+  const hasFilters = Boolean(normalizeSearch(searchState.query) || searchState.ingredients.size || searchState.traditions.size);
+  const count = `${matches.length.toLocaleString()} ${matches.length === 1 ? 'recipe' : 'recipes'}`;
+  document.querySelector('#search-count').textContent = matches.length ? `${count}${hasFilters ? ' found' : ' in your collection'}${matches.length > SEARCH_PAGE_SIZE ? ` · Showing ${start + 1} to ${start + shown.length}` : ''}` : 'No recipes found';
+  const selectedCount = searchState.ingredients.size + searchState.traditions.size;
+  document.querySelector('#selected-tag-count').textContent = selectedCount ? `(${selectedCount} selected)` : '';
+  document.querySelector('#clear-search').disabled = !hasFilters && !searchState.query;
+  document.querySelector('#clear-tags').disabled = !selectedCount;
+  const results = document.querySelector('#search-results');
+  results.innerHTML = shown.length ? `<section class="recipe-grid" aria-label="Search results">${shown.map(recipe => `<article class="recipe-card" data-id="${esc(recipe.id)}"><a class="recipe-link" href="#/node/${esc(recipe.id)}">${imageMarkup(recipe)}<h2>${esc(nameOf(recipe))}</h2></a></article>`).join('')}</section>${pageCount > 1 ? `<nav class="search-pagination" aria-label="Search result pages"><button type="button" class="button" id="search-previous"${searchState.page === 1 ? ' disabled' : ''}>${svg('back')}Previous</button><span>Page ${searchState.page} of ${pageCount}</span><button type="button" class="button" id="search-next"${searchState.page === pageCount ? ' disabled' : ''}>Next${svg('arrow')}</button></nav>` : ''}` : `<section class="empty search-empty"><h2>${catalog.recipes.length ? 'Try a broader search.' : 'No recipes to search yet.'}</h2><p>${catalog.recipes.length ? 'Try a shorter recipe name or remove a tag. Recipes must include every selected ingredient and at least one selected tradition.' : 'Cookable recipes will appear here as they are added to your Recipes Vault.'}</p>${hasFilters ? '<button type="button" class="button" id="empty-clear-search">Clear search</button>' : ''}</section>`;
+  for (const [id, offset] of [['search-previous', -1], ['search-next', 1]]) {
+    document.querySelector(`#${id}`)?.addEventListener('click', () => {
+      searchState.page += offset;
+      renderSearchResults({ focus: true });
+      saveSearchRoute();
+      document.querySelector('#search-count').scrollIntoView({ block: 'start' });
+    });
+  }
+  document.querySelector('#empty-clear-search')?.addEventListener('click', clearSearch);
+  results.querySelectorAll('.recipe-link').forEach(link => link.addEventListener('click', () => {
+    searchState.scroll = window.scrollY;
+    searchState.returnFocus = link.closest('.recipe-card').dataset.id;
+    detailReturnRoute = searchRoute(searchState);
+  }));
+  wireImages(results);
+  if (focus) document.querySelector('#search-count').focus({ preventScroll: true });
+}
+
+function clearSearch() {
+  searchState.query = '';
+  searchState.ingredients.clear();
+  searchState.traditions.clear();
+  searchState.page = 1;
+  searchState.tagQueries = { ingredients: '', traditions: '' };
+  renderSearch();
+  saveSearchRoute();
+  document.querySelector('#recipe-query').focus();
+}
+
+function renderSearch({ keepPosition = false } = {}) {
+  if (!catalog?.available) { renderBrowse(); return; }
+  stopPathMotion();
+  stopPathMotion = () => {};
+  pathViewId = null;
+  document.title = 'Search recipes · Tonight';
+  const priorScroll = window.scrollY;
+  const activeId = document.activeElement?.id;
+  const selectionStart = document.activeElement?.selectionStart;
+  const selectionEnd = document.activeElement?.selectionEnd;
+  const warning = connectionLost ? 'Updates are temporarily unavailable. You can search the last shared collection.' : catalog.warning;
+  main.innerHTML = `<div class="intro search-intro"><div><h1>Find a recipe</h1><p>Looking for something specific? Search your whole collection.</p></div><a class="button quiet" href="#/">Back to ideas</a></div>${warning ? `<div class="notice" role="status">${esc(warning)}</div>` : ''}<form class="recipe-search" role="search" aria-label="Search recipes"><label class="query-label" for="recipe-query">Recipe name or keyword</label><div class="search-input-row"><input id="recipe-query" name="q" type="search" value="${esc(searchState.query)}" placeholder="Try bread or dan dan noodles" autocomplete="off" aria-describedby="search-help"><button class="button primary" type="submit">Search</button><button class="button quiet" type="button" id="clear-search">Clear</button></div><p id="search-help" class="search-hint">Search names, ingredients, traditions, and recipe keywords.</p><details class="advanced-search"${(searchState.advancedOpen ?? Boolean(searchState.ingredients.size || searchState.traditions.size)) ? ' open' : ''}><summary>Advanced search <span id="selected-tag-count"></span></summary><div class="search-filter-intro"><p class="search-hint">Combine ingredient and tradition tags to narrow your search.</p><button type="button" class="button quiet" id="clear-tags">Clear tags</button></div><div class="search-tag-groups">${searchTagGroup('ingredients', 'Ingredients', 'Include every selected ingredient tag.')}${searchTagGroup('traditions', 'Traditions', 'Include any selected tradition tag.')}</div></details></form><p id="search-count" class="search-count" role="status" aria-live="polite" tabindex="-1"></p><div id="search-results"></div>`;
+  main.querySelector('.recipe-search').addEventListener('submit', event => {
+    event.preventDefault();
+    searchState.page = 1;
+    renderSearchResults({ focus: true });
+    saveSearchRoute();
+  });
+  main.querySelector('#recipe-query').addEventListener('input', event => {
+    searchState.query = event.target.value;
+    searchState.page = 1;
+    renderSearchResults();
+    saveSearchRoute();
+  });
+  main.querySelector('#clear-search').addEventListener('click', clearSearch);
+  main.querySelector('#clear-tags').addEventListener('click', () => {
+    searchState.ingredients.clear();
+    searchState.traditions.clear();
+    searchState.page = 1;
+    main.querySelectorAll('.tag-choice input').forEach(input => { input.checked = false; });
+    renderSearchResults();
+    saveSearchRoute();
+  });
+  main.querySelector('.advanced-search').addEventListener('toggle', event => { searchState.advancedOpen = event.target.open; });
+  main.querySelectorAll('[data-find-tags]').forEach(input => input.addEventListener('input', event => {
+    searchState.tagQueries[event.target.dataset.findTags] = event.target.value;
+    filterSearchTags(event.target.dataset.findTags);
+  }));
+  main.querySelectorAll('.tag-choice input').forEach(input => input.addEventListener('change', event => {
+    const { name, value, checked } = event.target;
+    if (checked) searchState[name].add(value); else searchState[name].delete(value);
+    searchState.page = 1;
+    renderSearchResults();
+    saveSearchRoute();
+  }));
+  ['ingredients', 'traditions'].forEach(filterSearchTags);
+  renderSearchResults();
+  if (keepPosition) {
+    const active = activeId && document.getElementById(activeId);
+    active?.focus({ preventScroll: true });
+    if (active?.type === 'search' && selectionStart != null) active.setSelectionRange(selectionStart, selectionEnd);
+    window.scrollTo(0, priorScroll);
+  }
+}
+
 async function renderNode(id, anchor = '', { keepPosition = false } = {}) {
   stopPathMotion();
   stopPathMotion = () => {};
   const currentRequest = ++requestNumber;
   const priorScroll = window.scrollY;
   const priorPathScroll = main.querySelector('.reaction-path-scroll')?.scrollLeft;
-  if (!keepPosition) main.innerHTML = '<div class="detail"><a class="button quiet" href="#/">Back to ideas</a><p>Opening recipe…</p></div>';
+  if (!keepPosition) main.innerHTML = `<div class="detail"><a class="button quiet" href="${esc(detailReturnRoute)}">${detailReturnRoute.startsWith('#/search') ? 'Back to search' : 'Back to ideas'}</a><p>Opening recipe…</p></div>`;
   try {
     const node = await getNode(id);
     if (currentRequest !== requestNumber) return;
@@ -303,7 +432,7 @@ async function renderNode(id, anchor = '', { keepPosition = false } = {}) {
     const metadata = Object.entries(node.metadata || {}).filter(([, value]) => value != null && value !== '');
     const animatePath = !keepPosition && pathViewId !== id;
     pathViewId = node.kind === 'recipe' ? id : null;
-    main.innerHTML = `<section class="detail"><nav class="detail-nav" aria-label="Recipe navigation"><button class="button quiet" id="back">${svg('back')}Back</button><a class="button quiet" href="#/">All ideas</a></nav>${reactionPathMarkup(node, animatePath)}<article class="recipe-body"></article><details class="metadata"><summary>Recipe details &amp; provenance</summary><dl>${metadata.map(([key, value]) => `<dt>${esc(key.replaceAll('_', ' '))}</dt><dd>${esc(typeof value === 'object' ? Array.isArray(value) ? value.join(', ') : JSON.stringify(value) : value)}</dd>`).join('')}</dl></details><p class="provenance">Read from your Recipes Vault. Original notes and source uncertainty are preserved.</p></section>`;
+    main.innerHTML = `<section class="detail"><nav class="detail-nav" aria-label="Recipe navigation"><button class="button quiet" id="back">${svg('back')}Back</button><a class="button quiet" href="${esc(detailReturnRoute)}">${detailReturnRoute.startsWith('#/search') ? 'Back to search' : 'All ideas'}</a></nav>${reactionPathMarkup(node, animatePath)}<article class="recipe-body"></article><details class="metadata"><summary>Recipe details &amp; provenance</summary><dl>${metadata.map(([key, value]) => `<dt>${esc(key.replaceAll('_', ' '))}</dt><dd>${esc(typeof value === 'object' ? Array.isArray(value) ? value.join(', ') : JSON.stringify(value) : value)}</dd>`).join('')}</dl></details><p class="provenance">Read from your Recipes Vault. Original notes and source uncertainty are preserved.</p></section>`;
     wirePathMotion(animatePath, animatePath ? undefined : priorPathScroll);
     wireImages(main);
     // The server renders and sanitizes vault Markdown. No unsanitized Markdown reaches innerHTML.
@@ -326,14 +455,14 @@ async function renderNode(id, anchor = '', { keepPosition = false } = {}) {
     });
     document.querySelector('#back').onclick = () => {
       if (navigationDepth > 0) history.back();
-      else location.hash = routeWithAccess('#/');
+      else location.hash = routeWithAccess(detailReturnRoute);
     };
     if (keepPosition) window.scrollTo(0, priorScroll);
     else if (anchor) document.getElementById(anchor)?.scrollIntoView();
     else { window.scrollTo(0, 0); main.focus({ preventScroll: true }); }
   } catch (error) {
     if (currentRequest !== requestNumber) return;
-    main.innerHTML = `<section class="empty"><h1>Couldn’t open that page.</h1><p>${esc(error.message)}</p><a class="button primary" href="#/">Back to ideas</a></section>`;
+    main.innerHTML = `<section class="empty"><h1>Couldn’t open that page.</h1><p>${esc(error.message)}</p><a class="button primary" href="${esc(detailReturnRoute)}">${detailReturnRoute.startsWith('#/search') ? 'Back to search' : 'Back to ideas'}</a></section>`;
   }
 }
 
@@ -341,8 +470,22 @@ function route({ keepPosition = false } = {}) {
   if (!catalog) { renderAccess(); return; }
   const hash = getRouteHash();
   const match = hash.match(/^#\/node\/([\w-]+)(?:\?(.*))?$/);
+  const isSearch = /^#\/search(?:\?|$)/.test(hash);
+  document.querySelector('#search-link').toggleAttribute('aria-current', isSearch);
+  if (isSearch) document.querySelector('#search-link').setAttribute('aria-current', 'page');
   if (match) {
     renderNode(match[1], new URLSearchParams(match[2] || '').get('section') || '', { keepPosition });
+  } else if (isSearch) {
+    ++requestNumber;
+    Object.assign(searchState, parseSearchRoute(hash));
+    renderSearch({ keepPosition });
+    saveSearchRoute();
+    if (!keepPosition) {
+      const fromRecipe = lastRoute.startsWith('#/node/');
+      window.scrollTo(0, fromRecipe ? searchState.scroll : 0);
+      const link = fromRecipe && searchState.returnFocus && main.querySelector(`[data-id="${CSS.escape(searchState.returnFocus)}"] .recipe-link`);
+      (link || document.querySelector('#recipe-query') || main).focus({ preventScroll: true });
+    }
   } else {
     ++requestNumber;
     renderBrowse();
@@ -352,7 +495,7 @@ function route({ keepPosition = false } = {}) {
       (link || main).focus({ preventScroll: true });
     }
   }
-  lastRoute = hash;
+  lastRoute = isSearch ? searchRoute(searchState) : hash;
 }
 
 function reset() {
@@ -375,6 +518,8 @@ async function loadCatalog(force = false) {
       const changed = catalog?.version !== next.version;
       const initialRender = !session;
       catalog = next;
+      if (changed) searchIndex = createSearchIndex(catalog.recipes);
+      document.querySelector('#search-link').hidden = false;
       connectionLost = getStatus().offline;
       document.querySelector('#reset').hidden = false;
       if (!session) { session = new DiscoverySession(catalog.recipes); session.next(); }
@@ -395,7 +540,7 @@ async function loadCatalog(force = false) {
         matchLabelsRevealed = false;
         renderAccess();
       } else if (!catalog) renderAccess();
-      else if (!getRouteHash().startsWith('#/node/')) renderBrowse();
+      else if (!getRouteHash().startsWith('#/node/')) route({ keepPosition: true });
     } finally {
       renderFreshness();
       catalogRequest = null;
@@ -438,6 +583,7 @@ function renderAccess() {
   stopPathMotion();
   document.title = 'Tonight · A shared recipe collection';
   document.querySelector('#reset').hidden = true;
+  document.querySelector('#search-link').hidden = true;
   const status = getStatus();
   const heading = status.offline ? 'The collection is taking a moment.' : 'You’re invited to Tonight.';
   const message = status.offline ? 'We couldn’t reach the shared recipes. Check your connection and try again.' : status.reason === 'invalid' ? 'This private link could not open the collection. Ask the person who shared Tonight for their latest link.' : 'Open the complete private link you received to explore the recipes. No account needed.';

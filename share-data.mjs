@@ -24,6 +24,11 @@ consumeAccessLink();
 export function getRouteHash(hash = location.hash) {
   if (!hash.startsWith('#key=')) return hash || '#/';
   const params = new URLSearchParams(hash.slice(1));
+  if (params.get('view') === 'search') {
+    const search = new URLSearchParams();
+    for (const [name, value] of params) if (['q', 'ingredient', 'tradition', 'page'].includes(name)) search.append(name, value);
+    return `#/search${search.size ? `?${search}` : ''}`;
+  }
   const recipe = params.get('recipe');
   if (!recipe || !/^[\w-]+$/.test(recipe)) return '#/';
   const section = params.get('section');
@@ -33,6 +38,12 @@ export function getRouteHash(hash = location.hash) {
 export function routeWithAccess(route = '#/') {
   if (!accessKey) return route;
   const params = new URLSearchParams({ key: accessKey });
+  const searchRoute = route.match(/^#\/search(?:\?(.*))?$/);
+  if (searchRoute) {
+    params.set('view', 'search');
+    for (const [name, value] of new URLSearchParams(searchRoute[1] || '')) if (['q', 'ingredient', 'tradition', 'page'].includes(name)) params.append(name, value);
+    return `#${params}`;
+  }
   const match = route.match(/^#\/node\/([\w-]+)(?:\?(.*))?$/);
   if (match) {
     params.set('recipe', match[1]);
@@ -54,6 +65,26 @@ function locked(reason) {
   const error = new Error('This collection needs a current private link.');
   error.code = 'LOCKED';
   return error;
+}
+
+function hydrateImages(collection) {
+  const assets = collection.assets ?? {};
+  const localImage = /^\/api\/image\/([a-f0-9]{64})$/;
+  const resolve = value => {
+    const match = typeof value === 'string' && localImage.exec(value);
+    if (!match) return value;
+    const asset = Object.hasOwn(assets, match[1]) ? assets[match[1]] : null;
+    return typeof asset === 'string' && asset.length <= 700_000 && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(asset) ? asset : null;
+  };
+  for (const recipe of collection.catalog.recipes) recipe.image = resolve(recipe.image);
+  for (const node of Object.values(collection.nodes)) {
+    node.image = resolve(node.image);
+    if (typeof node.html === 'string') node.html = node.html.replace(/<img\b[^>]*\bsrc="(\/api\/image\/[a-f0-9]{64})"[^>]*>/g, (tag, source) => {
+      const image = resolve(source);
+      return image ? tag.replace(`src="${source}"`, `src="${image}"`) : '<span class="notice">This source image is unavailable.</span>';
+    });
+  }
+  return collection;
 }
 
 export function getStatus() { return { ...state }; }
@@ -93,7 +124,7 @@ export async function refresh() {
       const next = JSON.parse(await new Response(stream).text());
       if (next.schema !== 1 || !Array.isArray(next.catalog?.recipes) || !next.nodes || !Number.isFinite(Date.parse(next.publishedAt))) throw new Error('Invalid collection');
       if (currentKey !== accessKey) throw new Error('Access changed');
-      snapshot = next;
+      snapshot = hydrateImages(next);
       state = { locked: false, reason: null, offline: false, publishedAt: next.publishedAt };
       return snapshot.catalog;
     } catch {
